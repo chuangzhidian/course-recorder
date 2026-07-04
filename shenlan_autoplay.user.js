@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         深蓝学院 视频自动连播（配合录屏无人值守）
 // @namespace    wechat2docx.video
-// @version      0.2.0
+// @version      0.3.0
 // @description  在深蓝学院课程页按顺序自动播放各视频课时：一节结束后自动切到下一节并开播，配合 OBS 等录屏工具实现整门课挂机录制。不下载/不解密，仅自动化你手动就能做的“点下一节+播放”。仅用于录制你已购/有权观看的内容。
 // @author       wechat2docx
 // @match        *://*.shenlanxueyuan.com/course/*
@@ -62,14 +62,23 @@
     const st = loadState();
     return (typeof st.idx === 'number') ? st.idx : -1;
   }
-  // 取播放器 video（在同源 iframe #task-content-iframe 内）
-  function getVideo() {
+  // 播放器 iframe 的文档（同源 #task-content-iframe）
+  function iframeDoc() {
     const f = document.querySelector('#task-content-iframe');
-    try {
-      const d = f && f.contentDocument;
-      if (d) { const v = d.querySelector('video'); if (v) return v; }
-    } catch (_) { /* 万一跨域 */ }
+    try { return (f && f.contentDocument) || null; } catch (_) { return null; }
+  }
+  // 取播放器 video
+  function getVideo() {
+    const d = iframeDoc();
+    if (d) { const v = d.querySelector('video'); if (v) return v; }
     return document.querySelector('video') || null;
+  }
+  // 保利威播放器是否处于“未播放”：容器带 pv-paused 类最可靠
+  //（注意：刚加载时 video.paused 会谎报 false，不能只信它）
+  function isPaused(d, v) {
+    const p = d && d.querySelector('.pv-video-player');
+    if (p) return /\bpv-paused\b/.test(p.className);
+    return v ? v.paused : true;
   }
   // 点击某一课时（触发加载该节视频）
   function clickLesson(li) {
@@ -77,34 +86,26 @@
     const a = li.querySelector('a[href]');
     (a || li).click();
   }
-  // 尝试开播：先 video.play()，被自动播放策略拦截则点播放器上的播放按钮/海报
-  function ensurePlaying(v) {
-    try {
-      if (v.paused) {
-        const p = v.play();
-        if (p && p.catch) p.catch(() => tryClickPlay());
-      }
-    } catch (_) { tryClickPlay(); }
-  }
-  function tryClickPlay() {
-    const f = document.querySelector('#task-content-iframe');
-    try {
-      const d = f && f.contentDocument;
-      if (!d) return;
-      const btn = d.querySelector(
-        '.pv-poster,.pv-video-poster,.plv-poster,.prism-play-btn,.vjs-big-play-button,' +
-        '[class*=play-btn],[class*=poster],[class*=start],[class*=play-icon]'
-      );
-      if (btn) btn.click();
-      else { const v = d.querySelector('video'); if (v) v.click(); }
-    } catch (_) {}
+  // 保证在播：保利威懒加载，直接 video.play() 无效，需点封面中央的大播放键
+  function maybeKickPlay() {
+    if (advancingId === curId) return;      // 正在切下一节，别去点“重播”把本节又放一遍
+    const d = iframeDoc();
+    if (!d) return;
+    if (!isPaused(d, getVideo())) return;   // 已在播，什么都不做
+    // 优先封面中央大播放键(span)，兜底控制条播放键(button)
+    const btn = d.querySelector('.pv-video-player span.pv-icon-btn-play')
+             || d.querySelector('.pv-cover .pv-icon-btn-play')
+             || d.querySelector('.pv-playpause');
+    if (btn) { btn.click(); if (kickLoggedId !== curId) { kickLoggedId = curId; log('▶ 触发播放'); } }
+    else { const v = getVideo(); if (v && v.play) v.play().catch(() => {}); }
   }
 
   // —————————————— 主循环 ——————————————
-  let curId = null;       // 当前正在处理的 task id
-  let curSince = 0;       // 进入当前 task 的时间戳（用于“无视频超时跳过”）
-  let curArmed = false;   // 当前节是否已挂好 ended 看守
-  let advancingId = null; // 已对哪个 task 触发过“切下一节”，避免重复推进
+  let curId = null;        // 当前正在处理的 task id
+  let curSince = 0;        // 进入当前 task 的时间戳（用于“无视频超时跳过”）
+  let curArmed = false;    // 当前节是否已挂好 ended 看守
+  let advancingId = null;  // 已对哪个 task 触发过“切下一节”，避免重复推进
+  let kickLoggedId = null; // 已为哪个 task 打过“触发播放”日志，避免刷屏
 
   function advanceFrom(i, why) {
     if (advancingId === curId) return; // 本节只推进一次
@@ -138,7 +139,7 @@
       if (Date.now() - curSince > NO_VIDEO_MS) advanceFrom(i, '本节无视频·跳过');
       return;
     }
-    ensurePlaying(v);             // 每个 tick 都保证在播（被暂停也会重试）
+    maybeKickPlay();             // 每个 tick 都保证在播（保利威需点播放键，被暂停也会重试）
     if (curArmed) return;
     curArmed = true;
 
@@ -225,7 +226,7 @@
   }
 
   // 重新开始/跳转前，清掉本轮看守状态
-  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; updateUI(); }
+  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; kickLoggedId = null; updateUI(); }
 
   function makeDraggable(handle, target) {
     let sx, sy, ox, oy, drag = false;
