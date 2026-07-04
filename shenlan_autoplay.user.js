@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         深蓝学院 视频自动连播（配合录屏无人值守）
 // @namespace    wechat2docx.video
-// @version      0.5.0
+// @version      0.6.0
 // @description  在深蓝学院课程页按顺序自动播放各视频课时：一节结束后自动切到下一节并开播，配合 OBS 等录屏工具实现整门课挂机录制。不下载/不解密，仅自动化你手动就能做的“点下一节+播放”。仅用于录制你已购/有权观看的内容。
 // @author       wechat2docx
 // @match        *://*.shenlanxueyuan.com/course/*
@@ -132,6 +132,7 @@
   let kickLoggedId = null; // 已为哪个 task 打过“触发播放”日志，避免刷屏
   let zeroAttempts = 0;    // 「从头」模式本节已尝试拉回进度的次数
   let zeroLogged = false;  // 「从头」本节是否已打过日志
+  let lastCur = 0;         // 上一 tick 的时钟秒数（用于检测“跳进”=续播/定位）
 
   function advanceFrom(i, why) {
     if (advancingId === curId) return; // 本节只推进一次
@@ -157,7 +158,7 @@
     const id = currentTaskId();
     if (id !== curId) {           // 切到了新的一节 → 重置本节看守
       curId = id; curSince = Date.now(); curArmed = false;
-      zeroAttempts = 0; zeroLogged = false;
+      zeroAttempts = 0; zeroLogged = false; lastCur = 0;
     }
 
     const d = iframeDoc();
@@ -171,10 +172,16 @@
       return;
     }
 
-    // 「每节从头」：进度不在开头就拉回 0（前 15 秒内重试，直到生效）
-    if (fromStart() && curOk > 3 && zeroAttempts < 6 && Date.now() - curSince < 15000) {
-      seekZero(d); zeroAttempts++;
-      if (!zeroLogged) { zeroLogged = true; log('⏮ 拉回从头'); }
+    // 「每节从头」：只在检测到“跳进”(续播/自动定位，时钟一次跳 >20s)时拉回开头。
+    //   正常逐秒播放 delta≈1，绝不触发，所以开头不会反复重播。
+    if (fromStart() && isFinite(cur)) {
+      if (cur - lastCur > 20 && zeroAttempts < 3) {
+        seekZero(d); zeroAttempts++;
+        if (!zeroLogged) { zeroLogged = true; log('⏮ 检测到续播，拉回从头'); }
+        lastCur = 0;              // 视为已回到开头
+      } else {
+        lastCur = cur;
+      }
     }
 
     // 到结尾（时钟 cur≈dur）→ 推进；先判结尾，避免又去点“重播”把本节重放
@@ -265,6 +272,7 @@
 
     logEl = document.createElement('div');
     logEl.style.cssText = 'margin-top:8px;max-height:110px;overflow:auto;font-size:11px;color:#475569;white-space:pre-wrap;border-top:1px solid #eef2f7;padding-top:6px';
+    logEl.textContent = '运行日志会显示在这里…';
     bodyEl.appendChild(logEl);
 
     document.body.appendChild(box);
@@ -272,7 +280,7 @@
   }
 
   // 重新开始/跳转前，清掉本轮看守状态
-  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; kickLoggedId = null; zeroAttempts = 0; zeroLogged = false; updateUI(); }
+  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; kickLoggedId = null; zeroAttempts = 0; zeroLogged = false; lastCur = 0; updateUI(); }
 
   function makeDraggable(handle, target) {
     let sx, sy, ox, oy, drag = false;
@@ -300,7 +308,7 @@
       ? `▶ 运行中 · 第 ${i + 1}/${list.length} 节`
       : `⏸ 待机 · 共 ${list.length} 个视频课时`;
     curEl.textContent = '当前：' + (i >= 0 ? lessonTitle(list[i]) : '未定位');
-    if (logEl) logEl.textContent = (loadTimeline().slice(-6).map(r => `${r.i}. ${r.at} ${r.title}`).join('\n')) || '日志…';
+    // 日志区交给 log() 管，这里不再覆盖（否则事件日志会被清单刷掉看不见）
   }
 
   function log(...a) {
