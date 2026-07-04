@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         深蓝学院 视频自动连播（配合录屏无人值守）
 // @namespace    wechat2docx.video
-// @version      0.4.0
+// @version      0.5.0
 // @description  在深蓝学院课程页按顺序自动播放各视频课时：一节结束后自动切到下一节并开播，配合 OBS 等录屏工具实现整门课挂机录制。不下载/不解密，仅自动化你手动就能做的“点下一节+播放”。仅用于录制你已购/有权观看的内容。
 // @author       wechat2docx
 // @match        *://*.shenlanxueyuan.com/course/*
@@ -103,13 +103,35 @@
     else { const v = getVideo(); if (v && v.play) v.play().catch(() => {}); }
   }
 
+  // —————————————— 时钟（保利威 WASM 播放器画在 canvas 上，<video> 是空壳，
+  //                只能读控制条时钟：.pv-time-current 当前 / .pv-time-duration 总时长）——————————————
+  function parseTime(txt) {
+    const p = (txt || '').trim().split(':').map(Number);
+    if (!p.length || p.some(n => isNaN(n))) return NaN;
+    return p.reduce((a, b) => a * 60 + b, 0);  // 支持 mm:ss 与 h:mm:ss
+  }
+  function readCur(d) { const e = d && d.querySelector('.pv-time-current'); return e ? parseTime(e.textContent) : NaN; }
+  function readDur(d) { const e = d && d.querySelector('.pv-time-duration'); return e ? parseTime(e.textContent) : NaN; }
+  // 「从头」：尽力把进度拉回 0（WASM 播放器，优先调其 JS API，兜底点进度条最左）
+  function seekZero(d) {
+    const w = (document.querySelector('#task-content-iframe') || {}).contentWindow;
+    try { if (w && w.player && w.player.seek) { w.player.seek(0); return; } } catch (_) {}
+    try { if (w && w.player && w.player.j2s_seekVideo) { w.player.j2s_seekVideo(0); return; } } catch (_) {}
+    try { if (w && w.polyvPlayer && w.polyvPlayer.seek) { w.polyvPlayer.seek(0); return; } } catch (_) {}
+    try {
+      const bar = d.querySelector('.pv-progress, .pv-slider, [class*=progress]');
+      if (bar) { const r = bar.getBoundingClientRect(); bar.dispatchEvent(new MouseEvent('click', { clientX: r.left + 1, clientY: r.top + r.height / 2, bubbles: true })); }
+    } catch (_) {}
+  }
+
   // —————————————— 主循环 ——————————————
   let curId = null;        // 当前正在处理的 task id
   let curSince = 0;        // 进入当前 task 的时间戳（用于“无视频超时跳过”）
   let curArmed = false;    // 当前节是否已挂好 ended 看守
   let advancingId = null;  // 已对哪个 task 触发过“切下一节”，避免重复推进
   let kickLoggedId = null; // 已为哪个 task 打过“触发播放”日志，避免刷屏
-  let zeroedId = null;     // 「从头」模式下已为哪个 task 拉回过进度
+  let zeroAttempts = 0;    // 「从头」模式本节已尝试拉回进度的次数
+  let zeroLogged = false;  // 「从头」本节是否已打过日志
 
   function advanceFrom(i, why) {
     if (advancingId === curId) return; // 本节只推进一次
@@ -135,29 +157,30 @@
     const id = currentTaskId();
     if (id !== curId) {           // 切到了新的一节 → 重置本节看守
       curId = id; curSince = Date.now(); curArmed = false;
+      zeroAttempts = 0; zeroLogged = false;
     }
 
-    const v = getVideo();
-    if (!v) {
-      // 迟迟没有视频 → 这一节可能是 PDF/课件，自动跳过
+    const d = iframeDoc();
+    if (!d) return;              // 播放器 iframe 还没就绪
+    const cur = readCur(d), dur = readDur(d);
+    const curOk = isFinite(cur) ? cur : 0;
+
+    // 没有时长时钟 → 可能是 PDF/课件，或还没加载好；超时则跳过
+    if (!(dur > 0)) {
       if (Date.now() - curSince > NO_VIDEO_MS) advanceFrom(i, '本节无视频·跳过');
       return;
     }
 
-    // 「每节从头」模式：把续播进度拉回 0（每节仅一次）
-    if (fromStart() && zeroedId !== curId && isFinite(v.duration) && v.currentTime > 0.3) {
-      try { v.currentTime = 0; } catch (_) {}
-      zeroedId = curId; log('⏮ 拉回从头');
+    // 「每节从头」：进度不在开头就拉回 0（前 15 秒内重试，直到生效）
+    if (fromStart() && curOk > 3 && zeroAttempts < 6 && Date.now() - curSince < 15000) {
+      seekZero(d); zeroAttempts++;
+      if (!zeroLogged) { zeroLogged = true; log('⏮ 拉回从头'); }
     }
 
-    // 判定“到结尾”：轮询 currentTime≈duration 比依赖 ended 更可靠
-    //（保利威播放结束往往只显示重播、并不触发 ended）
-    if (isFinite(v.duration) && v.duration > 0 && v.currentTime >= v.duration - 1.5) {
-      advanceFrom(i, '播放到结尾');
-      return;                    // 到结尾就别再点“重播”把本节又放一遍
-    }
+    // 到结尾（时钟 cur≈dur）→ 推进；先判结尾，避免又去点“重播”把本节重放
+    if (isFinite(cur) && cur >= dur - 2) { advanceFrom(i, '播放到结尾'); return; }
 
-    maybeKickPlay();             // 保证在播（保利威需点播放键，被暂停也会重试）
+    maybeKickPlay();             // 保证在播（保利威 WASM 需点封面播放键）
     if (curArmed) return;
     curArmed = true;
 
@@ -165,11 +188,8 @@
     log(`▶ 第 ${i + 1}/${list.length} 节开始：` + lessonTitle(list[i]));
     pushTimeline({ i: i + 1, title: lessonTitle(list[i]), at: started });
 
-    v.addEventListener('ended', () => advanceFrom(i, '播放结束'), { once: true });
-    const guard = (isFinite(v.duration) && v.duration > 0)
-      ? v.duration * 1000 + SAFETY_PAD_MS
-      : SAFETY_FALLBACK_MS;
-    setTimeout(() => advanceFrom(i, '看守超时'), guard);
+    // 兜底看守：万一时钟卡住不动，按剩余时长 + 余量强制推进
+    setTimeout(() => advanceFrom(i, '看守超时'), (dur - curOk) * 1000 + SAFETY_PAD_MS);
   }
 
   // —————————————— 控制面板 UI（建一次，之后只更新文字）——————————————
@@ -220,7 +240,7 @@
     const rowMode = document.createElement('div'); rowMode.style.cssText = 'display:flex';
     const bMode = mkBtn('', '#7c3aed');
     const refreshMode = () => { bMode.textContent = fromStart() ? '⏮ 每节从头（点此切续播）' : '⏯ 续播历史（点此切从头）'; };
-    bMode.onclick = () => { setFromStart(!fromStart()); zeroedId = null; refreshMode(); };
+    bMode.onclick = () => { setFromStart(!fromStart()); zeroAttempts = 0; zeroLogged = false; refreshMode(); };
     refreshMode();
     rowMode.appendChild(bMode); bodyEl.appendChild(rowMode);
 
@@ -252,7 +272,7 @@
   }
 
   // 重新开始/跳转前，清掉本轮看守状态
-  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; kickLoggedId = null; zeroedId = null; updateUI(); }
+  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; kickLoggedId = null; zeroAttempts = 0; zeroLogged = false; updateUI(); }
 
   function makeDraggable(handle, target) {
     let sx, sy, ox, oy, drag = false;
