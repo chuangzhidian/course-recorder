@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         深蓝学院 视频自动连播（配合录屏无人值守）
 // @namespace    wechat2docx.video
-// @version      0.6.0
+// @version      0.7.0
 // @description  在深蓝学院课程页按顺序自动播放各视频课时：一节结束后自动切到下一节并开播，配合 OBS 等录屏工具实现整门课挂机录制。不下载/不解密，仅自动化你手动就能做的“点下一节+播放”。仅用于录制你已购/有权观看的内容。
 // @author       wechat2docx
 // @match        *://*.shenlanxueyuan.com/course/*
@@ -34,6 +34,9 @@
   // 每节从头(true, 默认) / 续播历史进度(false)
   function fromStart() { return localStorage.getItem('sl_autoplay_fromstart') !== '0'; }
   function setFromStart(b) { localStorage.setItem('sl_autoplay_fromstart', b ? '1' : '0'); }
+  // 面板 UI 状态（折叠 / 位置）持久化——切课时整页刷新后仍保持，避免面板反复出现在录制画面里
+  function loadUI() { try { return JSON.parse(localStorage.getItem('sl_autoplay_ui')) || {}; } catch (_) { return {}; } }
+  function saveUI(patch) { localStorage.setItem('sl_autoplay_ui', JSON.stringify(Object.assign(loadUI(), patch))); }
 
   // —————————————— DOM 定位 ——————————————
   // 视频课时 = 目录里含【视频】的 li.task-item，按 DOM 顺序即课程顺序
@@ -232,7 +235,7 @@
     toggle.textContent = '—';
     toggle.title = '折叠/展开（拖动标题可移动面板）';
     toggle.style.cssText = 'border:0;background:#f1f5f9;border-radius:6px;width:22px;height:22px;cursor:pointer;font-weight:700';
-    toggle.onclick = () => { collapsed = !collapsed; bodyEl.style.display = collapsed ? 'none' : 'block'; toggle.textContent = collapsed ? '+' : '—'; };
+    toggle.onclick = () => { collapsed = !collapsed; bodyEl.style.display = collapsed ? 'none' : 'block'; toggle.textContent = collapsed ? '+' : '—'; saveUI({ collapsed }); };
     bar.appendChild(title); bar.appendChild(toggle); box.appendChild(bar);
     makeDraggable(bar, box);
 
@@ -275,6 +278,16 @@
     logEl.textContent = '运行日志会显示在这里…';
     bodyEl.appendChild(logEl);
 
+    // 恢复上次的位置与折叠状态（默认折叠，减少录进画面的干扰）
+    const ui = loadUI();
+    if (typeof ui.left === 'number' && typeof ui.top === 'number') {
+      box.style.right = 'auto'; box.style.bottom = 'auto';
+      box.style.left = ui.left + 'px'; box.style.top = ui.top + 'px';
+    }
+    collapsed = (ui.collapsed === false) ? false : true;   // 默认折叠
+    bodyEl.style.display = collapsed ? 'none' : 'block';
+    toggle.textContent = collapsed ? '+' : '—';
+
     document.body.appendChild(box);
     updateUI();
   }
@@ -296,7 +309,10 @@
       target.style.left = (ox + e.clientX - sx) + 'px';
       target.style.top = (oy + e.clientY - sy) + 'px';
     });
-    document.addEventListener('mouseup', () => { drag = false; });
+    document.addEventListener('mouseup', () => {
+      if (drag) saveUI({ left: parseFloat(target.style.left) || 0, top: parseFloat(target.style.top) || 0 });
+      drag = false;
+    });
   }
 
   function updateUI() {
