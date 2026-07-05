@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         深蓝学院 视频自动连播（配合录屏无人值守）
 // @namespace    wechat2docx.video
-// @version      0.8.0
+// @version      0.9.0
 // @description  在深蓝学院课程页按顺序自动播放各视频课时：一节结束后自动切到下一节并开播，配合 OBS 等录屏工具实现整门课挂机录制。不下载/不解密，仅自动化你手动就能做的“点下一节+播放”。仅用于录制你已购/有权观看的内容。
 // @author       wechat2docx
 // @match        *://*.shenlanxueyuan.com/course/*
@@ -22,7 +22,7 @@
   const SAFETY_FALLBACK_MS = 75 * 60 * 1000; // 时长未知时的单节最长看守（>最长课时即可）
   const NO_VIDEO_MS = 15 * 1000;       // 点开某节 N 秒内没出现视频 → 判为非视频(PDF/课件)，自动跳过
   const POLL_MS = 1000;
-  const AUTO_COLLAPSE_MS = 10 * 1000;  // 点“从第1节/从当前节”后，多少秒自动折叠面板（方便开录时不入镜）
+  const START_DELAY_MS = 10 * 1000;    // 点“从第1节/从当前节”后延迟多少秒再真正开播（给你时间切到 OBS 开录，避免丢开头）
 
   const LS_STATE = 'sl_autoplay_state';       // {running, idx}
   const LS_TIMELINE = 'sl_autoplay_timeline'; // [{i,title,at}]  供录完后剪辑分段
@@ -165,6 +165,16 @@
       zeroAttempts = 0; zeroLogged = false; lastCur = 0;
     }
 
+    // 起播延迟：点“从第1节/从当前节”后 hold 一会儿，给你切到 OBS 开录，期间保持不播放
+    if (st.holdUntil && Date.now() < st.holdUntil) {
+      if (statusEl) statusEl.textContent = `⏳ ${Math.ceil((st.holdUntil - Date.now()) / 1000)}s 后开始播放，请切到 OBS 开录`;
+      return;
+    }
+    if (st.holdUntil) {           // 到点：清除 hold、折叠面板、开始播放
+      const s = loadState(); delete s.holdUntil; saveState(s);
+      setCollapsed(true); log('▶ 开始播放');
+    }
+
     const d = iframeDoc();
     if (!d) return;              // 播放器 iframe 还没就绪
     const cur = readCur(d), dur = readDur(d);
@@ -205,7 +215,6 @@
 
   // —————————————— 控制面板 UI（建一次，之后只更新文字）——————————————
   let box, statusEl, curEl, logEl, bodyEl, toggleBtn, collapsed = false;
-  let autoCollapseTimer = null;
 
   // 折叠/展开面板（并持久化，跨整页刷新保持）
   function setCollapsed(v) {
@@ -213,12 +222,6 @@
     if (bodyEl) bodyEl.style.display = v ? 'none' : 'block';
     if (toggleBtn) toggleBtn.textContent = v ? '+' : '—';
     saveUI({ collapsed: v });
-  }
-  // 开始连播后：留 AUTO_COLLAPSE_MS 秒缓冲，自动折叠面板（开录时不入镜）
-  function scheduleAutoCollapse() {
-    if (autoCollapseTimer) clearTimeout(autoCollapseTimer);
-    log(`▶ 已开始，${AUTO_COLLAPSE_MS / 1000}s 后自动折叠面板`);
-    autoCollapseTimer = setTimeout(() => setCollapsed(true), AUTO_COLLAPSE_MS);
   }
 
   function mkBtn(text, bg) {
@@ -274,8 +277,8 @@
     const row1 = document.createElement('div'); row1.style.cssText = 'display:flex';
     const bStart = mkBtn('▶ 从第1节', '#07c160');
     const bHere = mkBtn('▶ 从当前节', '#2563eb');
-    bStart.onclick = () => { localStorage.removeItem(LS_TIMELINE); resetRun(0); clickLesson(lessons()[0]); scheduleAutoCollapse(); };
-    bHere.onclick = () => { const j = Math.max(0, currentIndex(lessons())); resetRun(j); log('从当前节开始'); tick(); scheduleAutoCollapse(); };
+    bStart.onclick = () => { localStorage.removeItem(LS_TIMELINE); resetRun(0, START_DELAY_MS); clickLesson(lessons()[0]); };
+    bHere.onclick = () => { const j = Math.max(0, currentIndex(lessons())); resetRun(j, START_DELAY_MS); log('从当前节开始'); tick(); };
     row1.appendChild(bStart); row1.appendChild(bHere); bodyEl.appendChild(row1);
 
     const row2 = document.createElement('div'); row2.style.cssText = 'display:flex';
@@ -308,7 +311,13 @@
   }
 
   // 重新开始/跳转前，清掉本轮看守状态
-  function resetRun(idx) { saveState({ running: true, idx }); curId = null; curArmed = false; advancingId = null; kickLoggedId = null; zeroAttempts = 0; zeroLogged = false; lastCur = 0; updateUI(); }
+  function resetRun(idx, holdMs) {
+    const s = { running: true, idx };
+    if (holdMs) s.holdUntil = Date.now() + holdMs;   // 延迟起播的截止时间戳（存 state，跨整页刷新有效）
+    saveState(s);
+    curId = null; curArmed = false; advancingId = null; kickLoggedId = null; zeroAttempts = 0; zeroLogged = false; lastCur = 0;
+    updateUI();
+  }
 
   function makeDraggable(handle, target) {
     let sx, sy, ox, oy, drag = false;
