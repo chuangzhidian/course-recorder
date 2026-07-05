@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         深蓝学院 视频自动连播（配合录屏无人值守）
 // @namespace    wechat2docx.video
-// @version      0.7.0
+// @version      0.8.0
 // @description  在深蓝学院课程页按顺序自动播放各视频课时：一节结束后自动切到下一节并开播，配合 OBS 等录屏工具实现整门课挂机录制。不下载/不解密，仅自动化你手动就能做的“点下一节+播放”。仅用于录制你已购/有权观看的内容。
 // @author       wechat2docx
 // @match        *://*.shenlanxueyuan.com/course/*
@@ -22,6 +22,7 @@
   const SAFETY_FALLBACK_MS = 75 * 60 * 1000; // 时长未知时的单节最长看守（>最长课时即可）
   const NO_VIDEO_MS = 15 * 1000;       // 点开某节 N 秒内没出现视频 → 判为非视频(PDF/课件)，自动跳过
   const POLL_MS = 1000;
+  const AUTO_COLLAPSE_MS = 10 * 1000;  // 点“从第1节/从当前节”后，多少秒自动折叠面板（方便开录时不入镜）
 
   const LS_STATE = 'sl_autoplay_state';       // {running, idx}
   const LS_TIMELINE = 'sl_autoplay_timeline'; // [{i,title,at}]  供录完后剪辑分段
@@ -203,7 +204,22 @@
   }
 
   // —————————————— 控制面板 UI（建一次，之后只更新文字）——————————————
-  let box, statusEl, curEl, logEl, bodyEl, collapsed = false;
+  let box, statusEl, curEl, logEl, bodyEl, toggleBtn, collapsed = false;
+  let autoCollapseTimer = null;
+
+  // 折叠/展开面板（并持久化，跨整页刷新保持）
+  function setCollapsed(v) {
+    collapsed = v;
+    if (bodyEl) bodyEl.style.display = v ? 'none' : 'block';
+    if (toggleBtn) toggleBtn.textContent = v ? '+' : '—';
+    saveUI({ collapsed: v });
+  }
+  // 开始连播后：留 AUTO_COLLAPSE_MS 秒缓冲，自动折叠面板（开录时不入镜）
+  function scheduleAutoCollapse() {
+    if (autoCollapseTimer) clearTimeout(autoCollapseTimer);
+    log(`▶ 已开始，${AUTO_COLLAPSE_MS / 1000}s 后自动折叠面板`);
+    autoCollapseTimer = setTimeout(() => setCollapsed(true), AUTO_COLLAPSE_MS);
+  }
 
   function mkBtn(text, bg) {
     const b = document.createElement('button');
@@ -235,7 +251,8 @@
     toggle.textContent = '—';
     toggle.title = '折叠/展开（拖动标题可移动面板）';
     toggle.style.cssText = 'border:0;background:#f1f5f9;border-radius:6px;width:22px;height:22px;cursor:pointer;font-weight:700';
-    toggle.onclick = () => { collapsed = !collapsed; bodyEl.style.display = collapsed ? 'none' : 'block'; toggle.textContent = collapsed ? '+' : '—'; saveUI({ collapsed }); };
+    toggleBtn = toggle;
+    toggle.onclick = () => setCollapsed(!collapsed);
     bar.appendChild(title); bar.appendChild(toggle); box.appendChild(bar);
     makeDraggable(bar, box);
 
@@ -257,8 +274,8 @@
     const row1 = document.createElement('div'); row1.style.cssText = 'display:flex';
     const bStart = mkBtn('▶ 从第1节', '#07c160');
     const bHere = mkBtn('▶ 从当前节', '#2563eb');
-    bStart.onclick = () => { localStorage.removeItem(LS_TIMELINE); resetRun(0); clickLesson(lessons()[0]); };
-    bHere.onclick = () => { const j = Math.max(0, currentIndex(lessons())); resetRun(j); log('从当前节开始'); tick(); };
+    bStart.onclick = () => { localStorage.removeItem(LS_TIMELINE); resetRun(0); clickLesson(lessons()[0]); scheduleAutoCollapse(); };
+    bHere.onclick = () => { const j = Math.max(0, currentIndex(lessons())); resetRun(j); log('从当前节开始'); tick(); scheduleAutoCollapse(); };
     row1.appendChild(bStart); row1.appendChild(bHere); bodyEl.appendChild(row1);
 
     const row2 = document.createElement('div'); row2.style.cssText = 'display:flex';
@@ -284,9 +301,7 @@
       box.style.right = 'auto'; box.style.bottom = 'auto';
       box.style.left = ui.left + 'px'; box.style.top = ui.top + 'px';
     }
-    collapsed = (ui.collapsed === false) ? false : true;   // 默认折叠
-    bodyEl.style.display = collapsed ? 'none' : 'block';
-    toggle.textContent = collapsed ? '+' : '—';
+    setCollapsed((ui.collapsed === false) ? false : true);   // 默认折叠
 
     document.body.appendChild(box);
     updateUI();
