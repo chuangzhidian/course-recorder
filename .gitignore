@@ -1,4 +1,6 @@
 .DS_Store
 recordings/
+切片/
 *.mp4
 *.mkv
+分段表*.txt
